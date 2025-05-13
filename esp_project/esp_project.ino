@@ -298,7 +298,7 @@ void setup() {
     }
 
     db.begin();
-    db.clear();
+    //db.clear();
 
     db.init(kk::wifi_ssid, "");
     db.init(kk::wifi_pass, "");

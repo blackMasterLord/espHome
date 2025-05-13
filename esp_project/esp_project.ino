@@ -1,214 +1,35 @@
-﻿#include <AsyncTCP.h>
-#include <Arduino.h>
+﻿#include <Arduino.h>
+#include <LittleFS.h>
 #include <GTimer.h>
 #include <GyverDBFile.h>
-#include <LittleFS.h>
-#include <SettingsAsyncWS.h>
-#include <WiFiConnector.h>
+#include <SettingsGyverWS.h>
 #include <ESPmDNS.h>
-#include <ArduinoJson.h>
-#include "CustomJS.h"
 
-enum class WifiIndicatorStatus : uint8_t {
-    OFF = 0,
-
-    CONNECTED = 0,
-    CONNECTING,
-    DISCONNECTED,
-    SCAN,
-};
-
-class WifiStatusIndicator {
-public:
-    WifiIndicatorStatus status;
-
-    void init() {
-        setEnabled(false);
-    }
-
-    void changeStatus(WifiIndicatorStatus s) {
-        if (s == status) return;
-        status = s;
-        current_step = 0;
-        switch (status) {
-        case WifiIndicatorStatus::CONNECTED: R = 0, G = 255, B = 0; break;
-        case WifiIndicatorStatus::CONNECTING: R = 255, G = 165, B = 0; break;
-        case WifiIndicatorStatus::DISCONNECTED: R = 255, G = 0, B = 0; break;
-        case WifiIndicatorStatus::SCAN: R = 0, G = 0, B = 255; break;
-        default: R = 0, G = 0, B = 0; break;
-        }
-    }
-
-    void tick() {
-        if (!_enabled) return;
-        
-        static GTimer<millis> led_timer(int(1000 / steps), true);
-        if (led_timer) {
-            current_step++;
-            if (current_step > steps) {
-                current_step = 0;
-            }
-            uint8_t rm = map(current_step, 0, steps, 0, calcBrightness(R));
-            uint8_t gm = map(current_step, 0, steps, 0, calcBrightness(G));
-            uint8_t bm = map(current_step, 0, steps, 0, calcBrightness(B));
-            rgbLedWrite(RGB_BUILTIN, rm, gm, bm);
-        }
-
-        static GTimer<millis> status_timer(100, true);
-        if (status_timer) {
-            check_status();
-        }
-    }
-
-    void check_status() {
-        bool connected = WiFiConnector.connected();
-        bool connecting = WiFiConnector.connecting();
-        bool scan = WiFi.scanComplete() == WIFI_SCAN_RUNNING;
-        if (scan)
-            changeStatus(WifiIndicatorStatus::SCAN);
-        else if (connected)
-            changeStatus(WifiIndicatorStatus::CONNECTED);
-        else if (!connected && connecting)
-            changeStatus(WifiIndicatorStatus::CONNECTING);
-        else if (!connected && !connecting)
-            changeStatus(WifiIndicatorStatus::DISCONNECTED);
-        else {
-            changeStatus(WifiIndicatorStatus::OFF);
-        }
-
-    }
-
-    void setEnabled(bool enabled) {
-        _enabled = enabled;
-
-        Serial.println("[StatusIndicator] setEnabled = " + String(_enabled));
-
-        if (!_enabled) {
-            digitalWrite(RGB_BUILTIN, LOW);
-            changeStatus(WifiIndicatorStatus::OFF);
-        }
-    }
-
-    void setBrightness(int brightness) {
-        _brightness = constrain(brightness, 0, 100);
-
-        Serial.println("[StatusIndicator] setBrightness = " + String(_brightness));
-    }
-
-private:
-    uint8_t R, G, B;
-    uint8_t current_step = 0;
-    uint8_t steps = 33;
-
-    bool _enabled = true;
-    int _brightness = 50;
-
-    uint8_t calcBrightness(uint8_t color) const {
-        long temp = (long)color * _brightness + 50;
-        return constrain(temp / 100, 0, 255);
-    }
-};
-
-WifiStatusIndicator StatusIndicator;
-
-enum class wifiScanResult : int16_t {
-    SCAN_DONE = 0,
-    SCAN_RUNNING = -1,
-    SCAN_FAILED = -2,
-};
-
-class WifiScannerClass {
-    typedef std::function<void()> ScannerCallback;
-    typedef std::function<void(uint16_t numNetworks)> ScannerResultCallback;
-
-public:
-    void scanNetworks() {
-        WiFi.scanDelete();
-        WiFi.scanNetworks(true);
-        scan_done = false;
-    }
-
-    wifiScanResult getResult() {
-        return result;
-    }
-
-    int16_t getNumNetworks() const {
-        return numNetworks;
-    }
-
-    void tick() {
-        if (!scan_done) {
-            numNetworks = WiFi.scanComplete();
-            if (numNetworks == WIFI_SCAN_RUNNING) { setResult(wifiScanResult::SCAN_RUNNING); }
-            if (numNetworks == WIFI_SCAN_FAILED) { setResult(wifiScanResult::SCAN_FAILED); scan_done = true; }
-            else if (numNetworks >= 0) { setResult(wifiScanResult::SCAN_DONE); scan_done = true; }
-        }
-    }
-
-    void onStart(ScannerCallback cb) {
-        _run_cb = cb;
-    }
-
-    void onFailed(ScannerCallback cb) {
-        _fail_cb = cb;
-    }
-
-    void onComplete(ScannerResultCallback cb) {
-        _done_cb = cb;
-    }
-private:
-    bool scan_done = true;
-    int16_t numNetworks = WIFI_SCAN_FAILED;
-    wifiScanResult result = wifiScanResult::SCAN_FAILED;
-
-    ScannerCallback _run_cb = nullptr;
-    ScannerCallback _fail_cb = nullptr;
-    ScannerResultCallback _done_cb = nullptr;
-
-    void setResult(wifiScanResult newResult) {
-        if (result == newResult) {
-            return;
-        }
-
-        switch (newResult)
-        {
-        case wifiScanResult::SCAN_DONE:
-            if (_done_cb) _done_cb(numNetworks);
-            break;
-        case wifiScanResult::SCAN_RUNNING:
-            if (_run_cb) _run_cb();
-            break;
-        case wifiScanResult::SCAN_FAILED:
-            if (_fail_cb) _fail_cb();
-            break;
-        default:
-            break;
-        }
-
-        result = newResult;
-    }
-};
-
-WifiScannerClass WifiScanner;
+#include "WiFiStatusIndicator.h"
+#include "WifiScanner.h"
+#include "WiFiConnectorCustom.h"
+#include "Devices.h"
 
 GyverDBFile db(&LittleFS, "/data.db");
-SettingsAsyncWS sett("esphome.local", &db);
+SettingsGyverWS sett("esphome.local", &db);
+Devices devices;
 
 DB_KEYS(kk,
     wifi_ssid,
     wifi_pass,
     select_wifi,
-    apply,
-    add_vevice,
-    scan_wifi,
+
+    connect,
+    disconnect,
+    scan,
+    settings,
+    add_device,
+    clear_devices,
 
     status_indicator_sw,
     status_indicator_bright,
 
-    voice,
-
     devices_list,
-
     confirm
 );
 
@@ -220,62 +41,46 @@ enum class Tab : uint8_t {
     NONE,
 };
 
-enum class State : uint8_t {
-    IDLE = 0,
-    LOADING,
-
-    WIFI_SCANNING,
-    WIFI_CONNECTING,
-};
-
 struct Menu {
-    void setTab(Tab newTab, State newState = State::IDLE) {
+    void setTab(Tab newTab) {
         if (tab != newTab) {
             tab = newTab;
-            need_reload = true;
-        }
-        if (states[int(tab)] != newState) {
-            states[int(tab)] = newState;
             need_reload = true;
         }
 
         if (need_reload) {
             need_reload = false;
-            sett.reload();
+            update();
         }
+    }
+
+    void update() {
+        sett.reload();
     }
 
     Tab getTab() const {
         return tab;
     }
 
-    void setState(State newState, Tab forTab = Tab::NONE) {
-        int targetTab = forTab == Tab::NONE ? int(tab) : int(forTab);
-        if (states[targetTab] != newState) {
-            states[targetTab] = newState;
-            need_reload = true;
-        }
-
-        if (need_reload) {
-            need_reload = false;
-            sett.reload();
-        }
-    }
-
-    State getState(Tab forTab = Tab::NONE) const {
-        int targetTab = forTab == Tab::NONE ? int(tab) : int(forTab);
-        return states[targetTab];
-    }
-
     bool isLocked() const {
-        return states[int(tab)] == State::WIFI_SCANNING || states[int(tab)] == State::WIFI_CONNECTING;
+        return locked;
+    }
+
+    void lock() {
+        locked = true;
+    }
+
+    void unlock() {
+        locked = false;
     }
 
 private:
+    bool locked = false;
     bool need_reload = false;
     Tab tab = Tab::MAIN;
-    State states[int(Tab::TABS_SIZE)] = { State::IDLE, State::IDLE };
 } menu;
+
+
 
 static void callAlert(su::Text text) {
     sett.updater().alert(text);
@@ -289,18 +94,30 @@ static void callConfirm(su::Text text) {
     sett.updater().update(kk::confirm, text);
 }
 
+//TODO
+//static GTimerCb<millis> upd_timer;
+//static void HighLightText(Text findText = "") {
+//    upd_timer.startTimeout(1000, [findText]() {
+//        BSON p;
+//        p["findText"] = findText;
+//        sett.updater().update(kk::highlight, p);
+//    });
+//}
+
 static void scanWifi() {
     db.set(kk::wifi_ssid, "");
     db.set(kk::wifi_pass, "");
     db.set(kk::select_wifi, 0);
     WifiScanner.scanNetworks();
-    menu.setTab(Tab::SETTINGS, State::WIFI_SCANNING);
+    menu.lock();
+    menu.setTab(Tab::SETTINGS);
+    menu.update();
 }
 
-static void build(sets::Builder& _b) {
-    CustomBuilder b(_b);
-    
-    static int selected_tab = int(menu.getTab());
+static int selected_tab;
+static void build(sets::Builder& b) {
+
+    selected_tab = int(menu.getTab());
     if (!menu.isLocked() && b.Tabs("Главное меню;Настройки", &selected_tab)) {
         menu.setTab(Tab(selected_tab));
     }
@@ -311,240 +128,157 @@ static void build(sets::Builder& _b) {
 
     if (menu.getTab() == Tab::SETTINGS) {
         drawWifiMenu(b);
-        drawStatusIndicatorMenu(b);
-        drawAddDeviceMenu(b);
+        
+        if (!menu.isLocked()) {
+            drawStatusIndicatorMenu(b);
+            drawAddDeviceMenu(b);
+        }
     }
 }
 
-static void drawLoadingMenu(CustomBuilder& b) {
-    b.Loader("Загрузка...");
-    b.Voice(kk::voice, "Здесь VoiceWidget");
-}
-
-static void drawMainMenu(CustomBuilder& b) {
+static void drawMainMenu(sets::Builder& b) {
     if (b.beginGroup("Главное меню")) {
-        if (menu.getState() == State::IDLE) {
-            drawLoadingMenu(b);
+        if (!WiFiConnectorCustom.connected()) {
+            if (b.Button(kk::connect, "Подключиться к WiFi")) {
+                menu.setTab(Tab::SETTINGS);
+                //HighLightText("Настройки WiFi");
+            }
         }
-        b.endGroup();
-    }
-}
-
-static void drawWifiMenu(CustomBuilder& b) {
-    if (b.beginGroup("Настройки WiFi")) {
-        if (menu.getState() == State::WIFI_CONNECTING) {
-            b.Loader("Подключение к " + String(db[kk::wifi_ssid]));
-        }
-        else if (menu.getState() == State::WIFI_SCANNING) {
-            b.Loader("Поиск...");
-        }
-        else if (menu.getState() == State::IDLE) 
-        {
-            if (WiFiConnector.connected()) {
-                b.Paragraph("Подключено к " + String(db[kk::wifi_ssid]));
-                
-                if (b.Button(kk::apply, "Отключиться от " + String(db[kk::wifi_ssid]))) {
-                    callConfirm("Вы уверены, что хотите отключиться от WiFi сети " + String(db[kk::wifi_ssid]) + "?");
-                }
-                
-                bool conf_res;
-                if (b.Confirm(kk::confirm, "", &conf_res) && conf_res) {
-                    WiFiConnector.connect("", "");
-                    scanWifi();
+        else {
+            devices.load(db[kk::devices_list].toString());
+            if (devices.getNumOfDevices() == 0) {
+                b.Paragraph("Нет добавленных устройств.");
+                if (b.Button(kk::settings, "Перейти в настройки")) {
+                    menu.setTab(Tab::SETTINGS);
+                    //HighLightText("Устройства");
                 }
             }
             else {
-                if (WifiScanner.getResult() == wifiScanResult::SCAN_FAILED) {
-                    b.Paragraph("WiFi сети не найдены");
-                }
-                else if (WifiScanner.getResult() == wifiScanResult::SCAN_DONE) {
-                    String ssid_values = "Не выбрана;";
-                    for (int i = 0; i < WifiScanner.getNumNetworks(); i++) {
-                        ssid_values += WiFi.SSID(i) + ";";
-                    }
-
-                    if (b.Select(kk::select_wifi, "WiFi сеть", ssid_values)) {
-                        db[kk::wifi_ssid] = db[kk::select_wifi] == 0 ? "" : WiFi.SSID(uint8_t(db[kk::select_wifi]) - 1);
-                        sett.reload();
-                    }
-
-                    if (db[kk::select_wifi] > 0) {
-                        b.Pass(kk::wifi_pass, "Пароль");
-                        if (b.Button(kk::apply, "Подключиться к " + String(db[kk::wifi_ssid]))) {
-                            menu.setState(State::WIFI_CONNECTING);
-                            WiFiConnector.connect(db[kk::wifi_ssid], db[kk::wifi_pass]);
-                        }
-                    }
-                }
-
-                if (b.Button(kk::scan_wifi, "Повторить поиск")) {
-                    scanWifi();
-                }
+                drawDevicesButtonsMenu(b);
             }
         }
         b.endGroup();
     }
 }
 
-static void drawStatusIndicatorMenu(CustomBuilder& b) {
-    if (menu.getState() == State::IDLE && b.beginGroup("Настройки индикации WiFi")) {
+static void drawDevicesButtonsMenu(sets::Builder& b) {
+    for (size_t i = 0; i < devices.getNumOfDevices(); i++) {
+        auto& device = devices.getDevice(i);
+        if (b.Switch(device.getName(), &device.enabled)) {
+            device.setEnabled(device.enabled);
+            db[kk::devices_list] = devices.save();
+        }
+    }
+}
+
+static void drawWifiMenu(sets::Builder& b) {
+    if (b.beginGroup("Настройки WiFi"))  {
+        if (WifiScanner.getResult() == wifiScanResult::SCAN_RUNNING) {
+            b.Loader("Поиск...");
+        }
+        else if (WiFiConnectorCustom.connecting()) {
+            b.Loader("Подключение к " + String(db[kk::wifi_ssid]));
+        }
+        else if(WiFiConnectorCustom.connected()) {
+            b.Paragraph("Подключено к " + String(db[kk::wifi_ssid]));
+
+            if (b.Button(kk::disconnect, "Отключиться от " + String(db[kk::wifi_ssid]))) {
+                callConfirm("Вы уверены, что хотите отключиться от WiFi сети " + String(db[kk::wifi_ssid]) + "?");
+            }
+
+            bool conf_res;
+            if (b.Confirm(kk::confirm, "", &conf_res) && conf_res) {
+                scanWifi();
+                WiFiConnectorCustom.connect("", "");
+            }
+        }
+        else if (WifiScanner.getResult() == wifiScanResult::SCAN_FAILED) {
+            b.Paragraph("WiFi сети не найдены");
+            if (b.Button(kk::scan, "Повторить поиск")) { scanWifi(); }
+        }
+        else if (WifiScanner.getResult() == wifiScanResult::SCAN_DONE) {
+            String ssid_values = "Не выбрана;";
+            for (int i = 0; i < WifiScanner.getNumNetworks(); i++) {
+                ssid_values += WiFi.SSID(i) + ";";
+            }
+
+            if (b.Select(kk::select_wifi, "WiFi сеть", ssid_values)) {
+                db[kk::wifi_ssid] = db[kk::select_wifi] == 0 ? "" : WiFi.SSID(uint8_t(db[kk::select_wifi]) - 1);
+                menu.update();
+            }
+
+            if (db[kk::select_wifi] > 0) {
+                b.Pass(kk::wifi_pass, "Пароль");
+                if (b.Button(kk::connect, "Подключиться к " + String(db[kk::wifi_ssid]))) {
+                    WiFiConnectorCustom.connect(db[kk::wifi_ssid], db[kk::wifi_pass]);
+                }
+            }
+
+            if (b.Button(kk::scan, "Повторить поиск")) { scanWifi(); }
+        }
+        b.endGroup();
+    }
+}
+
+static void drawStatusIndicatorMenu(sets::Builder& b) {
+    if (b.beginGroup("Настройки индикации WiFi")) {
 
         if (b.Switch(kk::status_indicator_sw, "Индикация")) {
-            StatusIndicator.setEnabled(db[kk::status_indicator_sw].toBool());
+            WiFiStatusIndicator.setEnabled(db[kk::status_indicator_sw].toBool());
         }
 
         if (b.Slider(kk::status_indicator_bright, "Яркость", 0, 100, 1, "%")) {
-            StatusIndicator.setBrightness(db[kk::status_indicator_bright].toInt());
+            WiFiStatusIndicator.setBrightness(db[kk::status_indicator_bright].toInt());
         }
 
         b.endGroup();
     }
 }
 
-class DeviceData {
-public:
-    DeviceData(String newName = "Без названия", uint8_t pin = 0, bool enabled = false) : name(newName), hash(H(newName)), pin(pin), enabled(enabled) {}
+static void drawAddDeviceMenu(sets::Builder& b) {
+    if (WiFiConnectorCustom.connected() && b.beginGroup("Устройства")) {
 
-    String getName() const { return name; }
-    size_t getHash() const { return hash; }
-    uint8_t getPin() const { return pin; }
-    bool getEnabled() const { return enabled; }
-    void setEnabled(bool newEnabled) { enabled = newEnabled; }
-
-    void save(JsonObject obj) const {
-        obj["name"] = name;
-        obj["hash"] = hash;
-        obj["pin"] = pin;
-        obj["enabled"] = enabled;
-    }
-
-    bool load(JsonObject obj) {
-        if (!obj.containsKey("name") || !obj.containsKey("hash") || !obj.containsKey("pin") || !obj.containsKey("enabled")) {
-            return false;
-        }
-
-        name = obj["name"].as<String>();
-        hash = obj["hash"].as<size_t>();
-        pin = obj["pin"].as<uint8_t>();
-        enabled = obj["enabled"].as<bool>();
-
-        if (hash != H(name)) {
-            return false;
-        }
-
-        return true;
-    }
-
-private:
-    String name;
-    size_t hash;
-    uint8_t pin;
-    bool enabled;
-};
-
-class Devices {
-public:
-    size_t getNumOfDevices() {
-        return devices_list.size();
-    }
-
-    DeviceData& getDevice(size_t i) {
-        return devices_list.at(i);
-    }
-
-    DeviceData getDeviceByHash(size_t hash) {
-        auto it = std::find_if(devices_list.begin(), devices_list.end(),
-            [hash](const DeviceData& d) { return d.getHash() == hash; });
-        if (it != devices_list.end()) {
-            return *it;
-        }
-        return DeviceData("Not Found");
-    }
-
-    bool addNewDevice(String baseName = "Без названия") {
-        size_t baseHash = H(baseName);
-
-        bool exists = std::any_of(devices_list.begin(), devices_list.end(),
-            [baseHash](const DeviceData& d) { return d.getHash() == baseHash; });
-
-        if (!exists) {
-            devices_list.emplace_back(baseName);
-            return true;
-        }
-
-        int counter = 1;
-        String newName;
-        size_t newHash;
-
-        do {
-            newName = baseName + " " + String(counter++);
-            newHash = H(newName);
-        } while (std::any_of(devices_list.begin(), devices_list.end(),
-            [newHash](const DeviceData& d) { return d.getHash() == newHash; }));
-
-        devices_list.emplace_back(newName);
-        return true;
-    }
-
-    String save() {
-        Serial.println("[DevicesDB] save");
-        
-        StaticJsonDocument<1024> doc;
-        JsonArray array = doc.to<JsonArray>();
-
-        for (const auto& device : devices_list) {
-            JsonObject obj = array.createNestedObject();
-            device.save(obj);
-        }
-
-        String jsonStr;
-        serializeJson(doc, jsonStr);
-        return jsonStr;
-    }
-
-    bool load(String data) {
-        Serial.println("[DevicesDB] load");
-        
-        StaticJsonDocument<1024> doc;
-        DeserializationError error = deserializeJson(doc, data);
-        if (error) {
-            return false;
-        }
-
-        devices_list.clear();
-
-        JsonArray array = doc.as<JsonArray>();
-        for (JsonObject obj : array) {
-            DeviceData device;
-            if (device.load(obj)) {
-                devices_list.push_back(device);
-            }
-        }
-
-        return true;
-    }
-
-private:
-    std::vector<DeviceData> devices_list{};
-};
-
-Devices devices;
-
-static void drawAddDeviceMenu(CustomBuilder& b) {
-    if (menu.getState() == State::IDLE && b.beginGroup("Устройства")) {
-
-        if (b.Button(kk::add_vevice, "Добавить устройство") && devices.addNewDevice()) {
+        if (b.Button(kk::add_device, "Добавить устройство") && devices.addNewDevice()) {
             db[kk::devices_list] = devices.save();
-            sett.reload();
+            menu.update();
+        }
+
+        if (devices.getNumOfDevices() > 0 && b.Button(kk::clear_devices, "Удалить все")) {
+            devices.clear();
+            db[kk::devices_list] = devices.save();
+            menu.update();
         }
 
         b.Label("Всего устройств: " + String(devices.getNumOfDevices()));
 
-        if (devices.getNumOfDevices() > 0) {
+        if (devices.getNumOfDevices() > 0 && b.beginScroll()) {
             for (size_t i = 0; i < devices.getNumOfDevices(); i++) {
                 auto& device = devices.getDevice(i);
-                b.Paragraph(device.getName(), "Тип устройства");
+                String f = String((i + 1)) + ". " + device.getDeviceTypeName() + " " + device.getName();
+                if (b.beginDropdown(f)) {
+                    if (b.Input("Название:", &device.name)) {
+                        device.setName(device.name);
+                        db[kk::devices_list] = devices.save();
+                        menu.update();
+                    }
+
+                    if (b.Select("Вывод:", devices.getAvailPins(device.getHash()), &device.pin)) {
+                        device.setPin(device.pin);
+                        device.setEnabled(false);
+                        db[kk::devices_list] = devices.save();
+                        //menu.update();
+                    }
+
+                    if (b.Button("Удалить", sets::Colors::Red)) {
+                        device.setEnabled(false);
+                        devices.removeDeviceByHash(device.getHash());
+                        db[kk::devices_list] = devices.save();
+                        menu.update();
+                    }
+                    b.endDropdown();
+                }
             }
+            b.endScroll();
         }
 
         b.endGroup();
@@ -556,7 +290,12 @@ void setup() {
     Serial.begin(115200);
     Serial.println();
 
-    LittleFS.begin(true);
+    WiFiStatusIndicator.init();
+
+    if (!LittleFS.begin(true)) {
+        Serial.println("LittleFS mount Failed");
+        return;
+    }
 
     db.begin();
     //db.clear();
@@ -568,68 +307,77 @@ void setup() {
     db.init(kk::status_indicator_bright, 50);
     db.init(kk::devices_list, "");
 
-    StatusIndicator.init();
-
-    WiFiConnector.onConnect([]() {
+    WiFiConnectorCustom.onConnect([]() {
         Serial.print("[CONNECTOR] Connected! ");
         Serial.print(WiFi.localIP());
+        
         if (!MDNS.begin("esphome")) {
             Serial.println("Error setting up MDNS responder!");
         }
         else {
             Serial.println(" or esphome.local");
         }
+        
         callNotice("Подключение успешно, можете подключаться к WiFi сети " + String(db[kk::wifi_ssid]));
-        menu.setState(State::IDLE, Tab::SETTINGS);
+        menu.unlock();
+        menu.update();
         disconnect_timer.start();
     });
-    WiFiConnector.onConnecting([]() {
+    WiFiConnectorCustom.onConnecting([]() {
         Serial.println("[CONNECTOR] Try to connecting! ");
+        menu.lock();
+        menu.update();
     });
-    WiFiConnector.onError([]() {
+    WiFiConnectorCustom.onError([]() {
         Serial.print("[CONNECTOR] Error! start AP ");
         Serial.println(WiFi.softAPIP());
+        
+        if (!MDNS.begin("esphome")) {
+            Serial.println("Error setting up MDNS responder!");
+        }
+        else {
+            Serial.println(" or esphome.local");
+        }
+        
         if (!db[kk::wifi_ssid].toString().isEmpty()) {
             callAlert("Ошибка подключения к " + String(db[kk::wifi_ssid]));
         }
-        menu.setState(State::IDLE, Tab::SETTINGS);
+        menu.unlock();
+        menu.update();
     });
 
-    WiFiConnector.connect(db[kk::wifi_ssid], db[kk::wifi_pass]);
+    WiFiConnectorCustom.connect(db[kk::wifi_ssid], db[kk::wifi_pass]);
 
     WifiScanner.onStart([]() {
         Serial.println("[WIFI] Scan start!");
-        menu.setState(State::WIFI_SCANNING, Tab::SETTINGS);
+        menu.lock();
+        menu.update();
     });
-
     WifiScanner.onComplete([](uint16_t numNetworks) {
         Serial.println("[WIFI] Scan done, " + String(numNetworks) + " networks found!");
         callNotice("Найдено WiFi сетей: " + String(numNetworks));
-        menu.setState(State::IDLE, Tab::SETTINGS);
+        menu.unlock();
+        menu.update();
     });
-
     WifiScanner.onFailed([]() {
         Serial.println("[WIFI] Scan failed!");
         callAlert("Ошибка поиска WiFi сетей!");
-        menu.setState(State::IDLE, Tab::SETTINGS);
+        menu.unlock();
+        menu.update();
     });
 
     sett.begin();
     sett.onBuild(build);
-    sett.getServer();
-    sett.setCustom(custom, strlen_P(custom), false);
 
-    StatusIndicator.setEnabled(db[kk::status_indicator_sw].toBool());
-    StatusIndicator.setBrightness(db[kk::status_indicator_bright].toInt());
-
-    devices.load(db[kk::devices_list].toString());
+    WiFiStatusIndicator.setEnabled(db[kk::status_indicator_sw].toBool());
+    WiFiStatusIndicator.setBrightness(db[kk::status_indicator_bright].toInt());
 }
 
 void loop() {
-    WiFiConnector.tick();
+    WiFiConnectorCustom.tick();
     sett.tick();
     WifiScanner.tick();
-    StatusIndicator.tick();
+    WiFiStatusIndicator.tick();
 
     if (disconnect_timer) {
         Serial.println("[WIFI] SoftAP disconnect!");

@@ -38,8 +38,6 @@ public:
         if (newPin > 0) {
             if(selected_pin >= 0) digitalWrite(gpio_pins[selected_pin], LOW);
             selected_pin = newPin - 1;
-
-            Serial.println("Gpio valid = " + String(GPIO_IS_VALID_OUTPUT_GPIO(gpio_pins[selected_pin])));
             pinMode(gpio_pins[selected_pin], OUTPUT);
         }
         pin = newPin;
@@ -48,10 +46,8 @@ public:
     bool getEnabled() const { return enabled; }
     void setEnabled(bool newEnabled) { 
         enabled = newEnabled; 
-        Serial.println("setEnabled selected_pin = " + String(selected_pin));
         if (selected_pin >= 0) {
             digitalWrite(gpio_pins[selected_pin], uint8_t(newEnabled));
-            Serial.println("digitalWrite to " + String(gpio_pins[selected_pin]) + " enabled = " + String(newEnabled));
         }
     }
 
@@ -114,7 +110,7 @@ int s3_pins[] = { 0, 2, 4, 5, 6, 15, 16, 17, 18, 19, 20, 21, 26, 27, 28, 29, 30,
 gpio_pins.assign(std::begin(s3_pins), std::end(s3_pins));
 
 #elif defined(CONFIG_IDF_TARGET_ESP32C3)
-int c3_pins[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 18, 19, 20, 21 };
+int c3_pins[] = { 4, 5, 6, 7, 8, 9, 10, 18, 19, 20, 21 };
 gpio_pins.assign(std::begin(c3_pins), std::end(c3_pins));
 
 #elif defined(ESP8266)
@@ -273,6 +269,9 @@ gpio_pins.assign(std::begin(esp8266_pins), std::end(esp8266_pins));
     }
 
     void clear() {
+        for (size_t i = 0; i < getNumOfDevices(); i++) {
+            getDevice(i).setEnabled(false);
+        }
         devices_list.clear();
     }
 
